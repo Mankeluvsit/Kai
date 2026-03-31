@@ -1,0 +1,48 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'androidApp/**'
+      - 'composeApp/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/android-debug-apk.yml'
+
+jobs:
+  build-debug-apk:
+    name: Build Foss Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept licenses and install SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Assemble debug APK
+        run: ./gradlew :androidApp:assembleFossDebug --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: androidApp-foss-debug
+          path: androidApp/build/outputs/apk/foss/debug/*.apk

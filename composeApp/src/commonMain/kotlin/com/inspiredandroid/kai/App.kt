@@ -44,9 +44,11 @@ import com.inspiredandroid.kai.ui.LightColorScheme
 import com.inspiredandroid.kai.ui.Theme
 import com.inspiredandroid.kai.ui.chat.ChatScreen
 import com.inspiredandroid.kai.ui.chat.ChatViewModel
+import com.inspiredandroid.kai.ui.dashboard.StatusDashboardScreen
 import com.inspiredandroid.kai.ui.settings.SettingsScreen
 import kai.composeapp.generated.resources.Res
 import kai.composeapp.generated.resources.tab_chat
+import kai.composeapp.generated.resources.tab_dashboard
 import kai.composeapp.generated.resources.tab_settings
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -63,6 +65,10 @@ object Home
 @Serializable
 @SerialName("settings")
 object Settings
+
+@Serializable
+@SerialName("dashboard")
+object Dashboard
 
 @Composable
 fun App(
@@ -132,13 +138,14 @@ private fun AppContent(
     CompositionLocalProvider(LocalDensity provides scaledDensity) {
         Theme(colorScheme = colorScheme) {
             val chatViewModel: ChatViewModel = koinViewModel()
-            val showTabBar = !isMobilePlatform
+            val showTabBar = true
             val currentBackStackEntry by navController.currentBackStackEntryAsState()
             val isHome = currentBackStackEntry?.destination?.route == "home"
+            val isDashboard = currentBackStackEntry?.destination?.route == "dashboard"
 
             val navigationTabBar: @Composable () -> Unit = {
                 val isRtl = LocalLayoutDirection.current == LayoutDirection.Rtl
-                val count = 2
+                val count = 3
                 SingleChoiceSegmentedButtonRow {
                     SegmentedButton(
                         selected = isHome,
@@ -154,7 +161,20 @@ private fun AppContent(
                         Text(stringResource(Res.string.tab_chat))
                     }
                     SegmentedButton(
-                        selected = !isHome,
+                        selected = isDashboard,
+                        onClick = {
+                            navController.navigate(Dashboard) {
+                                popUpTo(Home)
+                                launchSingleTop = true
+                            }
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(index = if (isRtl) 1 else 1, count = count),
+                        modifier = Modifier.pointerHoverIcon(PointerIcon.Hand),
+                    ) {
+                        Text(stringResource(Res.string.tab_dashboard))
+                    }
+                    SegmentedButton(
+                        selected = !isHome && !isDashboard,
                         onClick = {
                             navController.navigate(Settings) {
                                 popUpTo(Home)
@@ -181,6 +201,11 @@ private fun AppContent(
                         onNavigateToSettings = {
                             navController.navigate(Settings)
                         },
+                        navigationTabBar = if (showTabBar) navigationTabBar else null,
+                    )
+                }
+                composable<Dashboard> {
+                    StatusDashboardScreen(
                         navigationTabBar = if (showTabBar) navigationTabBar else null,
                     )
                 }

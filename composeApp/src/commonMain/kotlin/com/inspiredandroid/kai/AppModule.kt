@@ -10,6 +10,7 @@ import com.inspiredandroid.kai.data.RemoteDataRepository
 import com.inspiredandroid.kai.data.TaskScheduler
 import com.inspiredandroid.kai.data.TaskStore
 import com.inspiredandroid.kai.data.ToolExecutor
+import com.inspiredandroid.kai.integrations.ServiceDashboardRepository
 import com.inspiredandroid.kai.mcp.McpServerManager
 import com.inspiredandroid.kai.network.Requests
 import com.inspiredandroid.kai.splinterlands.SplinterlandsApi
@@ -18,6 +19,7 @@ import com.inspiredandroid.kai.splinterlands.SplinterlandsStore
 import com.inspiredandroid.kai.tools.CalendarPermissionController
 import com.inspiredandroid.kai.tools.NotificationPermissionController
 import com.inspiredandroid.kai.ui.chat.ChatViewModel
+import com.inspiredandroid.kai.ui.dashboard.StatusDashboardViewModel
 import com.inspiredandroid.kai.ui.settings.SandboxViewModel
 import com.inspiredandroid.kai.ui.settings.SettingsViewModel
 import com.inspiredandroid.kai.ui.settings.SplinterlandsViewModel
@@ -62,6 +64,9 @@ val appModule = module {
     single<McpServerManager> {
         McpServerManager(get())
     }
+    single<ServiceDashboardRepository> {
+        ServiceDashboardRepository(get())
+    }
     single<RemoteDataRepository> {
         RemoteDataRepository(
             requests = get(),
@@ -88,4 +93,5 @@ val appModule = module {
     viewModel { SandboxViewModel(get<DataRepository>(), get<SandboxController>()) }
     viewModel { SplinterlandsViewModel(get<DataRepository>(), get(), get(), get<SplinterlandsApi>()) }
     viewModel { ChatViewModel(get<DataRepository>(), get<TaskScheduler>()) }
+    viewModel { StatusDashboardViewModel(get<ServiceDashboardRepository>()) }
 }
