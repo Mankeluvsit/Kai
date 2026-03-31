@@ -10,8 +10,10 @@ import io.ktor.client.plugins.cookies.HttpCookies
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
@@ -102,6 +104,10 @@ class ServiceDashboardRepository(
         }
 
         return try {
+            val rootResponse = client.get(baseUrl)
+            val rootBody = rootResponse.bodyAsText()
+            val uiReachable = rootResponse.status.value in 200..299 && rootBody.contains("<html", ignoreCase = true)
+
             if (config.token.isNotBlank()) {
                 val loginResponse = client.post("${baseUrl.trimEnd('/')}/auth/login") {
                     contentType(ContentType.Application.Json)
@@ -117,24 +123,35 @@ class ServiceDashboardRepository(
                 }
             }
 
-            val methods = readJsonDataArray(
-                client.get("${baseUrl.trimEnd('/')}/codex-api/meta/methods").bodyAsText(),
+            val methods = readJsonDataArrayOrNull(
+                client.get("${baseUrl.trimEnd('/')}/codex-api/meta/methods"),
             )
-            val notifications = readJsonDataArray(
-                client.get("${baseUrl.trimEnd('/')}/codex-api/meta/notifications").bodyAsText(),
+            val notifications = readJsonDataArrayOrNull(
+                client.get("${baseUrl.trimEnd('/')}/codex-api/meta/notifications"),
             )
-            val homeDirectory = readJsonDataObject(
-                client.get("${baseUrl.trimEnd('/')}/codex-api/home-directory").bodyAsText(),
-            )["path"]?.jsonPrimitive?.content.orEmpty()
+            val homeDirectory = readJsonDataObjectOrNull(
+                client.get("${baseUrl.trimEnd('/')}/codex-api/home-directory"),
+            )?.get("path")?.jsonPrimitive?.content.orEmpty()
+            val apiReachable = methods != null && notifications != null
 
             ManagedServiceStatus(
                 serviceId = ManagedServiceId.CodexUi,
-                state = ManagedServiceState.Running,
-                statusMessage = "Bridge reachable",
+                state = when {
+                    apiReachable -> ManagedServiceState.Running
+                    uiReachable -> ManagedServiceState.Starting
+                    else -> ManagedServiceState.Stopped
+                },
+                statusMessage = when {
+                    apiReachable -> "Bridge reachable"
+                    uiReachable -> "Web UI reachable, API bridge unavailable"
+                    else -> "Server unavailable"
+                },
                 lastCheckedAtMillis = nowMillis(),
                 metadata = buildList {
-                    add(ServiceStatusField("RPC methods", methods.size.toString()))
-                    add(ServiceStatusField("Notifications", notifications.size.toString()))
+                    add(ServiceStatusField("Web UI", if (uiReachable) "Reachable" else "Unavailable"))
+                    add(ServiceStatusField("API bridge", if (apiReachable) "Reachable" else "Unavailable"))
+                    if (methods != null) add(ServiceStatusField("RPC methods", methods.size.toString()))
+                    if (notifications != null) add(ServiceStatusField("Notifications", notifications.size.toString()))
                     if (homeDirectory.isNotBlank()) add(ServiceStatusField("Workspace", homeDirectory))
                 },
             )
@@ -151,6 +168,8 @@ class ServiceDashboardRepository(
     }
 
     private suspend fun fetchOpenClawStatus(config: ManagedServiceConfig): ManagedServiceStatus {
+        suspend fun httpFallback(reason: String): ManagedServiceStatus = fetchOpenClawHttpStatus(config, reason)
+
         val wsUrl = buildUrl(
             base = if (config.gatewayUrl.isNotBlank()) config.gatewayUrl else config.serverUrl,
             port = if (config.gatewayPort > 0) config.gatewayPort else config.port,
@@ -172,12 +191,7 @@ class ServiceDashboardRepository(
         return try {
             val session = client.webSocketSession(urlString = wsUrl)
             if (!session.isActive) {
-                return ManagedServiceStatus(
-                    serviceId = ManagedServiceId.OpenClaw,
-                    state = ManagedServiceState.Stopped,
-                    statusMessage = "Gateway unavailable",
-                    lastCheckedAtMillis = nowMillis(),
-                )
+                return httpFallback("Gateway unavailable")
             }
 
             val connectId = newRequestId()
@@ -328,11 +342,78 @@ class ServiceDashboardRepository(
                 },
             )
         } catch (error: Throwable) {
+            httpFallback(error.message ?: "Gateway unavailable")
+        } finally {
+            client.close()
+        }
+    }
+
+    private suspend fun fetchOpenClawHttpStatus(
+        config: ManagedServiceConfig,
+        fallbackReason: String,
+    ): ManagedServiceStatus {
+        val baseUrl = buildUrl(config.serverUrl, config.port)
+        val client = httpClient {
+            install(ContentNegotiation) {
+                json(SharedDashboardJson)
+            }
+            install(HttpTimeout) {
+                requestTimeoutMillis = 8_000
+                connectTimeoutMillis = 5_000
+                socketTimeoutMillis = 8_000
+            }
+        }
+
+        return try {
+            val liveResponse = client.get("${baseUrl.trimEnd('/')}/health") {
+                applyOpenClawAuth(config)
+            }
+            val readyResponse = client.get("${baseUrl.trimEnd('/')}/readyz") {
+                applyOpenClawAuth(config)
+            }
+
+            val livePayload = readJsonDataObjectOrNull(liveResponse)
+            val readyPayload = readJsonDataObjectOrNull(readyResponse)
+            val isLive = liveResponse.status.value in 200..299
+            val isReady = readyResponse.status == HttpStatusCode.OK &&
+                readyPayload?.get("ready")?.jsonPrimitive?.contentOrNull != "false"
+            val uptime = readyPayload?.get("uptimeMs")?.jsonPrimitive?.longOrNull?.let(::formatDurationMillis).orEmpty()
+            val failingChecks = readyPayload?.get("failing")
+                ?.jsonArray
+                ?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                .orEmpty()
+
+            ManagedServiceStatus(
+                serviceId = ManagedServiceId.OpenClaw,
+                state = when {
+                    isReady -> ManagedServiceState.Running
+                    isLive -> ManagedServiceState.Starting
+                    else -> ManagedServiceState.Stopped
+                },
+                statusMessage = when {
+                    isReady -> "Gateway reachable over HTTP"
+                    isLive -> "Gateway live, not ready"
+                    else -> fallbackReason
+                },
+                uptime = uptime,
+                lastCheckedAtMillis = nowMillis(),
+                metadata = buildList {
+                    livePayload?.get("status")?.jsonPrimitive?.contentOrNull?.let {
+                        add(ServiceStatusField("Health", it))
+                    }
+                    add(ServiceStatusField("Transport", "HTTP fallback"))
+                    if (failingChecks.isNotEmpty()) {
+                        add(ServiceStatusField("Failing checks", failingChecks.joinToString()))
+                    }
+                },
+            )
+        } catch (_: Throwable) {
             ManagedServiceStatus(
                 serviceId = ManagedServiceId.OpenClaw,
                 state = ManagedServiceState.Stopped,
-                statusMessage = error.message ?: "Gateway unavailable",
+                statusMessage = fallbackReason,
                 lastCheckedAtMillis = nowMillis(),
+                metadata = listOf(ServiceStatusField("Transport", "HTTP fallback")),
             )
         } finally {
             client.close()
@@ -363,7 +444,9 @@ private fun buildUrl(
     }
 }
 
-private fun readJsonDataArray(raw: String): JsonArray {
+private suspend fun readJsonDataArrayOrNull(response: HttpResponse): JsonArray? {
+    val raw = response.bodyAsText()
+    if (!looksLikeJsonResponse(response, raw)) return null
     val root = SharedDashboardJson.parseToJsonElement(raw)
     return when (root) {
         is JsonArray -> root
@@ -372,11 +455,30 @@ private fun readJsonDataArray(raw: String): JsonArray {
     }
 }
 
-private fun readJsonDataObject(raw: String): JsonObject {
+private suspend fun readJsonDataObjectOrNull(response: HttpResponse): JsonObject? {
+    val raw = response.bodyAsText()
+    if (!looksLikeJsonResponse(response, raw)) return null
     val root = SharedDashboardJson.parseToJsonElement(raw)
     return when (root) {
         is JsonObject -> root["data"]?.jsonObject ?: root
-        else -> buildJsonObject {}
+        else -> null
+    }
+}
+
+private fun looksLikeJsonResponse(response: HttpResponse, raw: String): Boolean {
+    val contentType = response.contentType()
+    if (contentType != null && contentType.match(ContentType.Application.Json)) return true
+    val trimmed = raw.trimStart()
+    if (trimmed.startsWith("<!doctype", ignoreCase = true) || trimmed.startsWith("<html", ignoreCase = true)) {
+        return false
+    }
+    return trimmed.startsWith("{") || trimmed.startsWith("[")
+}
+
+private fun io.ktor.client.request.HttpRequestBuilder.applyOpenClawAuth(config: ManagedServiceConfig) {
+    val token = config.token.trim()
+    if (token.isNotBlank()) {
+        header("Authorization", "Bearer $token")
     }
 }
 
